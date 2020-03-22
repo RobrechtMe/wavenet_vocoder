@@ -208,3 +208,11 @@ Temporary Items
 
 # Linux trash folder which might appear on any partition or disk
 .Trash-*
+
+
+models/
+checkpoints/
+datasets/
+cgn_nl_vl/
+cgn_all/
+condor_logs/

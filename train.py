@@ -14,6 +14,29 @@ options:
     --speaker-id=<N>             Use specific speaker of data in case for multi-speaker datasets.
     -h, --help                   Show this help message and exit
 """
+from hparams import hparams, hparams_debug_string
+import audio
+from wavenet_vocoder.mixture import sample_from_mix_gaussian
+from wavenet_vocoder.mixture import mix_gaussian_loss
+from wavenet_vocoder.mixture import sample_from_discretized_mix_logistic
+from wavenet_vocoder.mixture import discretized_mix_logistic_loss
+from wavenet_vocoder.util import is_mulaw_quantize, is_mulaw, is_raw, is_scalar_input
+from wavenet_vocoder import WaveNet
+from warnings import warn
+from matplotlib import cm
+from tensorboardX import SummaryWriter
+import librosa.display
+from nnmnkwii.datasets import FileSourceDataset, FileDataSource
+from nnmnkwii import preprocessing as P
+from torch.utils.data.sampler import Sampler
+from torch.utils import data as data_utils
+import torch.backends.cudnn as cudnn
+from torch import optim
+from torch.nn import functional as F
+from torch import nn
+import torch
+import lrschedule
+import matplotlib.pyplot as plt
 from docopt import docopt
 
 import sys
@@ -30,36 +53,7 @@ import numpy as np
 
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
-import lrschedule
-
-import torch
-from torch import nn
-from torch.nn import functional as F
-from torch import optim
-import torch.backends.cudnn as cudnn
-from torch.utils import data as data_utils
-from torch.utils.data.sampler import Sampler
-
-from nnmnkwii import preprocessing as P
-from nnmnkwii.datasets import FileSourceDataset, FileDataSource
-
-import librosa.display
-
-from tensorboardX import SummaryWriter
-from matplotlib import cm
-from warnings import warn
-
-from wavenet_vocoder import WaveNet
-from wavenet_vocoder.util import is_mulaw_quantize, is_mulaw, is_raw, is_scalar_input
-from wavenet_vocoder.mixture import discretized_mix_logistic_loss
-from wavenet_vocoder.mixture import sample_from_discretized_mix_logistic
-from wavenet_vocoder.mixture import mix_gaussian_loss
-from wavenet_vocoder.mixture import sample_from_mix_gaussian
-
-import audio
-from hparams import hparams, hparams_debug_string
 
 global_step = 0
 global_test_step = 0
@@ -170,63 +164,33 @@ class _NPYDataSource(FileDataSource):
         self.typ = typ
 
     def collect_files(self):
-        meta = join(self.dump_root, "train.txt")
-        if not exists(meta):
-            paths = sorted(glob(join(self.dump_root, "*-{}.npy".format(self.typ))))
-            return paths
+        meta = join(self.dump_root, self.typ)
+        assert exists(meta)
+       
+        with open(join(self.dump_root, 'len.scp'), "rb") as f:
+            lines = f.readlines()
+        self.lengths = list(map(lambda l: int(l.decode("utf-8").split()[1]), lines))
 
         with open(meta, "rb") as f:
             lines = f.readlines()
-        l = lines[0].decode("utf-8").split("|")
-        assert len(l) == 4 or len(l) == 5
-        self.multi_speaker = len(l) == 5
-        self.lengths = list(
-            map(lambda l: int(l.decode("utf-8").split("|")[2]), lines))
-
-        paths_relative = list(map(lambda l: l.decode("utf-8").split("|")[self.col], lines))
-        paths = list(map(lambda f: join(self.dump_root, f), paths_relative))
-
-        # Exclude small files (assuming lenghts are in frame unit)
-        # TODO: consider this for multi-speaker
-        if self.max_steps is not None:
-            idx = np.array(self.lengths) * self.hop_size > self.max_steps + 2 * self.cin_pad * self.hop_size
-            if idx.sum() != len(self.lengths):
-                print("{} short samples are omitted for training.".format(len(self.lengths) - idx.sum()))
-            self.lengths = list(np.array(self.lengths)[idx])
-            paths = list(np.array(paths)[idx])
-
-        if self.multi_speaker:
-            speaker_ids = list(map(lambda l: int(l.decode("utf-8").split("|")[-1]), lines))
-            self.speaker_ids = speaker_ids
-            if self.speaker_id is not None:
-                # Filter by speaker_id
-                # using multi-speaker dataset as a single speaker dataset
-                indices = np.array(speaker_ids) == self.speaker_id
-                paths = list(np.array(paths)[indices])
-                self.lengths = list(np.array(self.lengths)[indices])
-                # aha, need to cast numpy.int64 to int
-                self.lengths = list(map(int, self.lengths))
-                self.multi_speaker = False
-
-        if self.multi_speaker:
-            speaker_ids_np = list(np.array(self.speaker_ids)[indices])
-            self.speaker_ids = list(map(int, speaker_ids_np))
-            assert len(paths) == len(self.speaker_ids)
+        paths = list(map(lambda l: l.decode("utf-8").split()[1], lines))
 
         return paths
 
     def collect_features(self, path):
-        return np.load(path)
+        if path.endswith('.wav'):
+            return audio.load_wav(path)
+        return np.load(path)[:-1]
 
 
 class RawAudioDataSource(_NPYDataSource):
     def __init__(self, dump_root, **kwargs):
-        super(RawAudioDataSource, self).__init__(dump_root, 0, "wave", **kwargs)
+        super(RawAudioDataSource, self).__init__(dump_root, 1, 'wav.scp', **kwargs)
 
 
 class MelSpecDataSource(_NPYDataSource):
     def __init__(self, dump_root, **kwargs):
-        super(MelSpecDataSource, self).__init__(dump_root, 1, "feats", **kwargs)
+        super(MelSpecDataSource, self).__init__(dump_root, 1, 'feats.scp', **kwargs)
 
 
 class PartialyRandomizedSimilarTimeLengthSampler(Sampler):
@@ -699,7 +663,7 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
     # y : (B, T, 1)
     # c : (B, C, T)
     # g : (B,)
-    train = (phase == "train_no_dev")
+    train = (phase == "train")
     clip_thresh = hparams.clip_thresh
     if train:
         model.train()
@@ -801,7 +765,7 @@ def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=No
     global global_step, global_epoch, global_test_step
     while global_epoch < hparams.nepochs:
         for phase, data_loader in data_loaders.items():
-            train = (phase == "train_no_dev")
+            train = (phase == "train")
             running_loss = 0.
             test_evaluated = False
             for step, (x, y, c, g, input_lengths) in tqdm(enumerate(data_loader)):
@@ -979,8 +943,9 @@ def get_data_loaders(dump_root, speaker_id, test_shuffle=True):
     else:
         max_steps = None
 
-    for phase in ["train_no_dev", "dev"]:
-        train = phase == "train_no_dev"
+    for phase in ["train", "dev"]:
+        train = phase == "train"
+        print(dump_root, speaker_id, phase)
         X = FileSourceDataset(
             RawAudioDataSource(join(dump_root, phase), speaker_id=speaker_id,
                                max_steps=max_steps, cin_pad=hparams.cin_pad,
@@ -1067,9 +1032,10 @@ if __name__ == "__main__":
         json.dump(hparams.values(), f, indent=2)
 
     # Dataloader setup
+    print(dump_root, speaker_id)
     data_loaders = get_data_loaders(dump_root, speaker_id, test_shuffle=True)
 
-    maybe_set_epochs_based_on_max_steps(hparams, len(data_loaders["train_no_dev"]))
+    maybe_set_epochs_based_on_max_steps(hparams, len(data_loaders["train"]))
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
