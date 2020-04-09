@@ -80,7 +80,7 @@ def get_data_loader(data_dir, collate_fn):
         assert len(X) == len(C)
         if C[0].shape[-1] != hparams.cin_channels:
             raise RuntimeError(
-                """Invalid cin_channnels {}. Expectd to be {}.""".format(
+                """Invalid cin_channnels {}. Expected to be {}.""".format(
                     hparams.cin_channels, C[0].shape[-1]))
         dataset = PyTorchDataset(X, C)
 
@@ -222,12 +222,12 @@ if __name__ == "__main__":
 
             # Paths
             if g is None:
-                dst_wav_path = join(dst_dir, "{}_gen.wav".format(
+                dst_wav_path = join(dst_dir, "{}.wav".format(
                     name))
                 target_wav_path = join(dst_dir, "{}_ref.wav".format(
                     name))
             else:
-                dst_wav_path = join(dst_dir, "speaker{}_{}_gen.wav".format(
+                dst_wav_path = join(dst_dir, "speaker{}_{}.wav".format(
                     g, name))
                 target_wav_path = join(dst_dir, "speaker{}_{}_ref.wav".format(
                     g, name))

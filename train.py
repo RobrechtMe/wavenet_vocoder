@@ -148,7 +148,6 @@ def to_categorical(y, num_classes=None, dtype='float32'):
     return categorical
 
 
-# TODO: I know this is too ugly...
 class _NPYDataSource(FileDataSource):
     def __init__(self, dump_root, col, typ="", speaker_id=None, max_steps=8000,
                  cin_pad=0, hop_size=256):
@@ -165,7 +164,10 @@ class _NPYDataSource(FileDataSource):
 
     def collect_files(self):
         meta = join(self.dump_root, self.typ)
-        assert exists(meta)
+        
+        if not exists(meta):
+            paths = sorted(glob(join(self.dump_root, "*.npy")))
+            return paths
        
         with open(join(self.dump_root, 'len.scp'), "rb") as f:
             lines = f.readlines()
